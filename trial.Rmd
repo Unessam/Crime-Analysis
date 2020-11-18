@@ -236,7 +236,7 @@ _____________________________________________________________________________
 
 ```{r}
 
-ggmap::register_google(key = "AIzaSyB7kotZiSXAG2fZcRM-tefWyPerBMbAODU")
+ggmap::register_google()
 #set.seed(20)
 #map<-get_map("greater manchester, uk", zoom = 10)
 #ggmap(map)
