@@ -1,0 +1,505 @@
+---
+title: "Crime Analysis"
+author: "Younes Sandi"
+date: "11/17/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Start
+
+Importing required libraries 
+
+```{r}
+options(warn = -1)
+library(naniar)
+library(anytime) #converting date-time
+library(lubridate)
+library(plyr) #importing multiple csv files and merging them
+library(e1071)
+library(dbscan)
+library(MASS)
+library(corrplot)
+library(LiblineaR)
+library(ggplot2)
+library(ggmap)
+library(dplyr)
+library(gridExtra)
+library(caret)
+library(ggExtra)
+library(readr)
+library(janitor)
+
+
+```
+
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Accessing Data, splitting train and test, random sampling for further analysis
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+```{r}
+setwd("E:/Datasets/crime/crime dataset/Crime Analysis")
+getwd()
+list.files(pattern="*.csv")
+```
+
+
+
+```{r}
+temp = list.files(pattern="*.csv")
+dataset<- ldply(temp, read.csv, header=TRUE)
+# dataset includes 97 subframe from 2010-12 to 2018-12
+head(dataset)
+dim(dataset)
+# the dataset has 2841166 rows and 12 columns
+```
+
+```{r}
+print(names(dataset))
+```
+
+```{r}
+#preparing a dataset with appropriate features,
+# removing "Crime.ID", "Reported.by", "Falls.within", "LSOA.code",
+# "Last.outcome.category", and "Context"
+drops<- c("Crime.ID", "Reported.by", "Falls.within", "LSOA.code",
+          "Last.outcome.category","Context")
+dataset<- dataset[, !(names(dataset) %in% drops)]
+names(dataset)
+```
+
+
+```{r}
+# the Dataset is too bulky, hence for the purpose of this analysis, 40% of data
+# has been sampled randomely
+
+set.seed(42)
+rows<- sample(nrow(dataset), as.integer((nrow(dataset))*0.1))
+sample_df<- dataset[rows, ]
+
+# shuffling the dataset, and spliting the dataset into test(60%) and test(40%)
+set.seed(47)
+rows<- sample(nrow(sample_df), as.integer((nrow(sample_df))*0.4))
+train<- sample_df[-rows, ]
+test<- sample_df[rows, ]
+write.csv(sample_df, "E:/Datasets/crime/crime dataset/Crime Analysis/data/sample_df.csv", row.names = T)
+write.csv(train, "E:/Datasets/crime/crime dataset/Crime Analysis/data/train.csv", row.names = T)
+write.csv(test, "E:/Datasets/crime/crime dataset/Crime Analysis/data/test.csv", row.names = T)
+write.csv(train, "E:/Datasets/crime/crime dataset/Crime Analysis/data/train.csv", row.names = T)
+write.csv(dataset, "E:/Datasets/crime/crime dataset/Crime Analysis/data/dataset.csv", row.names = T)
+
+# random sampling 10% of the train dataset to reduce computation load of visualization
+
+df<- train[sample(nrow(train), as.integer((nrow(train))*0.1)),]
+head(df)
+dim(df)
+rm(train, test, dataset, sample_df)
+write.csv(df, "E:/Datasets/crime/crime dataset/Crime Analysis/data/df.csv", row.names = T)
+rm(df)
+df<- read.csv("E:/Datasets/crime/crime dataset/Crime Analysis/data/df.csv", 
+              header = T, stringsAsFactors = F, na.strings = c("", "NA", "#N/A"))
+```
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Defining functions for analysis
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+
+```{r}
+# functions to make variables from date info.
+feat_crt<- function(dataframe){
+  
+  col_names<- names(dataframe)
+  dataframe <- data.frame(matrix(unlist(dataframe),nrow=nrow(dataframe)),stringsAsFactors=FALSE)
+  names(dataframe) <- col_names
+  
+  names(dataframe)[names(dataframe)== "X"]<- "Row_Number"
+  names(dataframe)[names(dataframe)== "Month"]<- "Date"
+  dataframe$Years <- year(anytime(dataframe$Date))
+  dataframe$Months <- month(anytime(dataframe$Date))
+  dataframe<-mutate(dataframe, Date_New=anydate(Date)) 
+  dataframe$District<- gsub("On or near ", "", as.character(dataframe$LSOA.name))
+  dataframe$District<- lapply(strsplit(dataframe$District," ",fixed=TRUE), "[", 1)
+  dataframe$Location<- gsub("On or near ", "", as.character(dataframe$Location))
+  row_dataframe= as.data.frame(dataframe$Row_Number)
+  col_drops<- c("Row_Number", "LSOA.name", "Date")
+  dataframe<- dataframe[, !(names(dataframe) %in% col_drops)]
+  dataframe<-mutate(dataframe, District = sapply(District, toString))
+  dataframe$Longitude<- as.numeric(dataframe$Longitude)
+  dataframe$Latitude<- as.numeric(dataframe$Latitude)
+  
+  return(dataframe)
+}
+
+
+# functions to draw map of crime.
+map_crime <- function(dataframe, crime) {
+  filtered <- filter(dataframe, Crime.type %in% crime)
+  plot <- ggmap(map, extent='device') + 
+    geom_point(data=filtered, 
+               aes(x=Longitude, y=Latitude, color=Category), alpha=0.1)
+  return(plot)
+}
+
+plot_crime_month <- function(dataframe, crime, month) {
+  filtered <- filter(dataframe, Crime.type %in% crime )
+  filtered <- summarise(group_by(filtered, Months ,Years),
+                        count = n())
+  print(filtered)
+  plot <- ggplot(data = filtered, 
+                 aes(x = Months,y = count,color = Years)) +
+    geom_point()
+  
+  return(plot)
+}
+
+# functions to make contour maps
+map_contours <- function(data, alp) {
+  p1 = ggmap(map, extent='device') + 
+    geom_point(data=data, aes(x=Longitude, y=Latitude), alpha= alp) + 
+    stat_density2d(aes(x = Longitude, y = Latitude,
+                       fill = ..level.., alpha = ..level..),
+                   size = 0.1, data = data, n=100,
+                   geom = "polygon") +
+    theme(legend.position="none")
+  return(p1)
+}
+
+plot_marginals <- function(data) {
+  p2 = ggplot(data=data, aes(x=Longitude, y=Latitude), alpha=0.1)+
+    geom_point()
+  p2 = ggMarginal(p2 + theme_gray(), type = "histogram",
+                  fill = "steelblue", col = "darkblue")
+  return(p2)
+}
+```
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Inspecting Dataframe and its variables
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+```{r}
+dim(df)
+names(df)
+head(df)
+str(df)
+table(as.character(sapply(df, class)))
+summary(df)
+vis_miss(df)
+sum(is.na(df)) #there is one missing value in the dataframe
+
+#inspecting number of unique values
+```
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Creating new features, changing data types, dropping junk columns, and renaming number of variables variables 
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+
+```{r}
+
+df<- feat_crt(df)
+table(as.character(sapply(df, class)))
+head(df)
+
+```
+
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Downloading required maps for the analysis
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+```{r}
+
+ggmap::register_google(key = "AIzaSyB7kotZiSXAG2fZcRM-tefWyPerBMbAODU")
+#set.seed(20)
+#map<-get_map("greater manchester, uk", zoom = 10)
+#ggmap(map)
+
+## defining coordination of Geater Manchester for the map
+
+paste0("Longitude: max ", max(df$Longitude), " & min ", min(df$Longitude)) 
+paste0("Longitude: max ", max(df$Latitude), " & min ", min(df$Latitude)) 
+loc<- c(left=-2.780, right=-1.960, top=53.67, bottom=53.33)
+map<-get_map(loc, color="bw")
+
+```
+
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Univariate Analysis
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+```{r}
+# Variable:(Longitude, Latitude)
+# Data type: Numeric, Continues
+# Overal Distribution of crime across the Greater Manchester
+
+dist_map <- ggmap(map, extent='device') + 
+  geom_point(data=df, aes(x=Longitude, y=Latitude),
+             alpha = 1/20,color = "red")+
+  scale_colour_brewer(type="qual")
+dist_map
+
+# Observation: the distribution of crime for a sample of ~41000 shows that the crime occurrence 
+# is distributed across the province, however, number of crimes in Manchester, and
+# populated towns is higher than the rural areas.
+
+
+mg_plot <- plot_marginals(df)
+mg_plot
+
+
+ct_plot <- map_contours(df,.05)
+ct_plot
+# Observation: detailed contour maps show that these crimes are concentrated in Manchester city 
+# more than other places
+
+
+```
+
+#_____________________________________________________________________________
+```{r}
+df[df$District=='NA',]
+```
+
+
+```{r}
+# Variable: (District)
+# Data type: Character
+
+#df<- df[complete.cases(df),] 
+df<- df[!(df$District=='NA'),]#removing missing values
+
+
+cnt_gp_dst = df %>%
+  group_by(District) %>%
+  dplyr::summarize(n = dplyr::n())
+
+cnt_gp_dst$District<-as.character(cnt_gp_dst$District)
+
+cnt_gp_dst<- as.data.frame(cnt_gp_dst) %>% 
+  transform(District= reorder(District,n))
+
+ggplot(cnt_gp_dst) +
+  geom_bar(aes(x=District, y=n, 
+               color = District, fill = District),
+           stat="identity")+
+  theme(legend.position="None")+
+  coord_flip()
+
+per_gp_dst <- df %>% 
+  group_by(District) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) 
+
+per_gp_dst$District <- as.character(per_gp_dst$District)
+
+per_gp_dst<- as.data.frame(per_gp_dst) %>% 
+  transform(District= reorder(District,perc))
+
+ggplot(per_gp_dst) +
+  geom_bar(aes(x=District, y=perc, 
+               color = District, fill = District),
+           stat="identity")+
+  theme(legend.position="None")+
+  coord_flip()
+
+# Observation: City of Manchester Accounts for roughly 30% of crimes in the province
+# followed by Bolton (11%) and Wilgan (9%)
+
+```
+#_____________________________________________________________________________
+```{r}
+# Variable: (Crime.type)
+# Data type: Character
+
+
+per_gp_crm <- df %>% 
+  group_by(Crime.type) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) 
+
+per_gp_crm$Crime.type <- as.character(per_gp_crm$Crime.type)
+
+per_gp_crm<- as.data.frame(per_gp_crm) %>% 
+  transform(Crime.type= reorder(Crime.type,perc))
+
+ggplot(per_gp_crm) +
+  geom_bar(aes(x=Crime.type, y=perc, 
+               color = Crime.type, fill = Crime.type),
+           stat="identity")+
+  theme(legend.position="None")+
+  coord_flip()
+
+# Observation: Violence and sexual offence accounts for more than 27% percent of
+# crimes followed by Anti-social behavior (17%), and Public order (12%), the least
+# occurrence belongs to Possession of weapons
+
+
+```
+
+#_____________________________________________________________________________
+```{r}
+# Variable: (Location)
+# Data type: Character
+
+per_gp_loc <- df %>% 
+  group_by(Location) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) 
+
+per_gp_loc$Location <- as.character(per_gp_loc$Location)
+
+per_gp_loc<- as.data.frame(per_gp_loc) %>% 
+  transform(Location= reorder(Location,perc))
+
+per_gp_loc[(per_gp_loc$count)>100,]
+
+
+ggplot(per_gp_loc[(per_gp_loc$count)>100,]) +
+  geom_bar(aes(x=Location, y=perc, 
+               color = Location, fill = Location),
+           stat="identity")+
+  theme(legend.position="None")+
+  coord_flip()
+
+paste0("These 6 Locations account for roughly ",
+       round((sum(per_gp_loc[(per_gp_loc$count)>100, "count"])
+              /sum(per_gp_loc$count))*100, 2),"% of whole crimes" )
+
+# Observation: Parking areas, followed by shopping ares, and supermarkets are
+# places with most occurrence of crimes
+
+
+```
+
+#_____________________________________________________________________________
+```{r}
+# Variable: (Years)
+# Data type:Numeric, Discrete (interval) 
+
+cnt_gp_yr = df %>%
+  group_by(Years) %>%
+  dplyr::summarize(n = dplyr::n())
+
+cnt_gp_yr$Years<-as.character(cnt_gp_yr$Years)
+
+#cnt_gp_yr<- as.data.frame(cnt_gp_yr) %>% 
+  #transform(Years= reorder(Years,n))
+
+ggplot(cnt_gp_yr) +
+  geom_bar(aes(x=Years, y=n, 
+               color = Years, fill = Years),
+           stat="identity")+
+  theme(legend.position="None")
+  
+ggplot(cnt_gp_yr) +
+  geom_line(aes(x=Years, y=n, group=1), color='red3')
+# Observation: Since this dataset does not include whole year information for
+# 2017 and 2019, further analysis of this feature is not possible
+
+```
+
+#_____________________________________________________________________________
+```{r}
+# Variable: (Months)
+# Data type:Numeric, Discrete (interval) 
+
+per_gp_mth <- df %>% 
+  group_by(Months) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) 
+
+per_gp_mth$Months <- as.character(per_gp_mth$Months)
+
+#per_gp_mth<- as.data.frame(per_gp_mth) %>% 
+  #transform(Months= reorder(Months,perc))
+per_gp_mth$Months <- factor(per_gp_mth$Months, levels=c(seq(12)))
+ggplot(per_gp_mth) +
+  geom_bar(aes(x=Months, y=perc, 
+               color = Months, fill = Months),
+           stat="identity")+
+  theme(legend.position="None")
+ggplot(per_gp_mth) +
+  geom_line(aes(x=Months, y=count, group=1), color='red3')  
+
+# Observation: Since this dataset does not include whole year information for
+# 2017 and 2019, further analysis of this feature is not possible
+
+
+```
+
+#_____________________________________________________________________________
+
+```{r}
+# Variable: (Date)
+# Data type:Numeric, Discrete (interval) 
+
+per_gp_dt <- df %>% 
+  group_by(Date_New) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) 
+
+per_gp_dt$Date_New <- as.character(per_gp_dt$Date_New)
+
+per_gp_dt<- as.data.frame(per_gp_dt) 
+  
+
+ggplot(per_gp_dt) +
+  geom_line(aes(y=count, x=Date_New, group=1), 
+               color = 'red3',stat="identity")+
+  theme(legend.position="None", axis.text.x = element_text(angle = 90, size = 5))
+
+# Observation: Number of crimes varies across the time and no seasonality can
+# be inferred from this plot, further investigation in terms of trend and seasonality
+# is possible by investigating bivariate and multivariate analysis in next section
+
+norm_gp_dt <- df %>% 
+  group_by(Date_New) %>% 
+  summarise(count = n()) %>%
+  mutate(norm_count = (count-mean(count))/sd(count))
+
+ggplot(norm_gp_dt) +
+  geom_line(aes(y=norm_count, x=Date_New, group=1), 
+               color = 'red3',stat="identity")+
+  theme(legend.position="None", axis.text.x = element_text(angle = 90, size = 5))
+```
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+## Bivariate Analysis
+
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+
