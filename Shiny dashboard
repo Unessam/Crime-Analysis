@@ -1,0 +1,71 @@
+library(shiny)
+library(shinydashboard)
+library(dplyr)
+library(leaflet)
+library(data.table)
+library(ggmap)
+
+runExample("01_hello")
+
+runExample("02_text")
+
+df<- read.csv("shiny_df.csv",header = T)
+dim(df)
+type <- c(as.character(unique(df$Crime.type)))
+
+###### crime map
+pass = XXXXXXXXX
+ggmap::register_google(key = pass)
+paste0("Longitude: max ", max(df$Longitude), " & min ", min(df$Longitude))
+paste0("Longitude: max ", max(df$Latitude), " & min ", min(df$Latitude))
+loc<- c(left=-2.780, right=-1.960, top=53.67, bottom=53.33)
+crimemap<-get_map(loc, color="bw")
+
+##### UI
+ui <- dashboardPage(dashboardHeader(title = p("Crime Map"), titleWidth = 300),
+                    dashboardSidebar(disable = T),
+                    dashboardBody(
+                      fluidRow(
+                        dashboard, map
+                      )
+                    ))
+
+
+
+dashboard <- column(width =4,
+                    # width set to NULL when use column-based layout
+                    box(width = NULL , title =tagList(shiny::icon("filter",class = 'fa-lg'), "Filter Data") ,
+                        solidHeader = T, collapsible = T, status = 'primary',
+                        # create a select-input widget for crime type selection
+                        selectizeInput('Crimetype','Crime Type', choices = type, width = 380,
+                                       
+                        
+                        # create a submit-button for user explicitly confirm data input
+                        submitButton(text = "Submit",icon =icon('filter'))
+                    )
+))
+
+map <- column(width =8,
+              box(width = NULL, solidHeader = TRUE,
+                  leafletOutput('crimemap',height = 500)))
+
+
+
+###### Server
+server <- function(input, output) {
+  # Create a reactive expression to filter data set per user requests
+  filteredData <- reactive({
+    df %>%
+      filter(Crime.type %in% input$Crimetype )
+     
+  })
+  # Use Leaflet to render crime map
+  output$crimemap <- renderLeaflet({
+    leaflet(filteredData()) %>%
+      addTiles(group = 'OSM') %>%
+      addMarkers(
+        ~Longitude, ~Latitude
+        ,clusterOptions = markerClusterOptions()
+      )
+  })
+}
